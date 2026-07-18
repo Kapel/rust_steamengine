@@ -1,0 +1,50 @@
+FROM steamcmd/steamcmd:ubuntu-22 as rust-server
+
+ENV RUST_APP_ID=258550
+ENV RUST_DIR=/rustserver
+
+RUN steamcmd +force_install_dir ${RUST_DIR} +login anonymous +app_update ${RUST_APP_ID} validate +quit && \
+    echo "=== Game DLLs ===" && ls ${RUST_DIR}/RustDedicated_Data/Managed/*.dll | wc -l
+
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y \
+    curl unzip gnupg ca-certificates && \
+    curl -sSL https://download.mono-project.com/repo/xamarin.gpg | gpg --dearmor -o /usr/share/keyrings/mono-official-archive-keyring.gpg && \
+    echo "deb [signed-by=/usr/share/keyrings/mono-official-archive-keyring.gpg] https://download.mono-project.com/repo/ubuntu stable-focal main" > /etc/apt/sources.list.d/mono-official-stable.list && \
+    apt-get update && apt-get install -y mono-complete && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+COPY --from=rust-server /rustserver/RustDedicated_Data/Managed/ ./game_refs/
+
+RUN curl -sL "https://api.github.com/repos/OxideMod/Oxide.Rust/releases/latest" \
+      | grep "browser_download_url" | grep "Oxide.Rust-linux.zip" \
+      | head -1 | cut -d '"' -f 4 \
+      | xargs curl -sLo /tmp/oxide.zip && \
+    unzip -o -j /tmp/oxide.zip "RustDedicated_Data/Managed/*.dll" -d ./oxide_refs/ && \
+    rm /tmp/oxide.zip && \
+    echo "=== game refs ===" && ls game_refs/*.dll | wc -l && \
+    echo "=== oxide refs ===" && ls oxide_refs/*.dll | wc -l
+
+COPY SteamEngine.cs .
+
+RUN REFS="" && \
+    for dll in \
+      netstandard \
+      Assembly-CSharp \
+      Facepunch.UnityEngine Facepunch.Network Facepunch.System Facepunch.Console Facepunch.Sqlite Facepunch.Rcon \
+      UnityEngine.CoreModule UnityEngine.PhysicsModule \
+      Rust.Global Rust.World Rust.Data \
+      Oxide.Core Oxide.CSharp Oxide.Rust Oxide.References; do \
+      if [ -f "game_refs/${dll}.dll" ]; then REFS="$REFS -r:game_refs/${dll}.dll"; \
+      elif [ -f "oxide_refs/${dll}.dll" ]; then REFS="$REFS -r:oxide_refs/${dll}.dll"; \
+      else echo "WARN: ${dll}.dll not found"; fi; \
+    done && \
+    echo "Refs: $REFS" && \
+    mcs -target:library -out:SteamEngine.dll -sdk:4.8 $REFS -nowarn:0436 SteamEngine.cs 2>&1
+
+RUN mkdir -p /output && cp SteamEngine.dll /output/
